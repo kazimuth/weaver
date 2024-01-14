@@ -1,7 +1,7 @@
-use std::{fmt::{Debug, Display}, ops::{Add, Index, Sub}, num::NonZeroU8};
-use ahash::AHashSet;
+use std::{fmt::{Debug, Display}, ops::{Add, Index, Sub, IndexMut}};
+use ahash::{AHashMap, AHashSet};
 
-use nannou::prelude::*;
+use nannou::{prelude::*, color};
 
 type List<T> = Vec<T>;
 #[allow(non_camel_case_types)]
@@ -115,6 +115,15 @@ impl Add<Quarters> for Quarters {
         Quarters(lhs_quarters + rhs_quarters)
     }
 }
+impl Sub<Quarters> for Quarters {
+    type Output = Self;
+
+    fn sub(self, rhs: Quarters) -> Self::Output {
+        let Quarters(lhs_quarters) = self;
+        let Quarters(rhs_quarters) = rhs;
+        Quarters(lhs_quarters - rhs_quarters)
+    }
+}
 
 impl Add<Halves> for Quarters {
     type Output = Self;
@@ -140,90 +149,12 @@ impl Display for Quarters {
 }
 
 #[derive(Clone)]
-struct ColorVar {
-    id: number,
-}
-impl Debug for ColorVar {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("c{}", self.id))
-    }
-}
-
-#[derive(Clone)]
 struct Pattern<T: Copy> {
     tiles: List<List<T>>,
     min_size: number,
     max_size: number,
     first_size: number,
 }
-
-type ThreadID = NonZeroU8;
-
-struct ThreadGrid {
-    width: number,
-    height: number,
-    positions: List<List<Option<ThreadID>>>
-}
-
-impl ThreadGrid {
-    fn new<T: Copy>(pattern: Pattern<T>) -> Self {
-        let width = pattern.max_size * 2;
-        let height = pattern.tiles.len() as number + 1;
-        let positions = vec![vec![None; width as usize]; height as usize];
-
-        ThreadGrid {
-            width,
-            height,
-            positions
-        }
-    }
-
-    fn get(&self, coord: ThreadCoord) -> Option<ThreadID> {
-        assert!(coord.row.0 % 2 == 1, "coord.row must be aligned to a quarter, not a half or whole: {:?}", coord);
-        assert!(coord.col.0 % 2 == 1, "coord.row must be aligned to a quarter, not a half or whole: {:?}", coord);
-        // the coordinate system is: index [0,0] corresponds to [-0.25, -0.25]; index [1, 1] corrseponds to 
-        let row = (coord.row + Quarters::one_quarter()).0 / 2;
-        let col = (coord.col + Quarters::one_quarter()).0 / 2;
-
-        self.positions[row as usize][col as usize]
-    }
-
-    fn set(&mut self, coord: ThreadCoord, id: Option<ThreadID>) {
-        assert!(coord.row.0 % 2 == 1, "coord.row must be aligned to a quarter, not a half or whole: {:?}", coord);
-        assert!(coord.col.0 % 2 == 1, "coord.row must be aligned to a quarter, not a half or whole: {:?}", coord);
-        // the coordinate system is: index [0,0] corresponds to [-0.25, -0.25]; index [1, 1] corrseponds to 
-        let row = (coord.row + Quarters::one_quarter()).0 / 2;
-        let col = (coord.col + Quarters::one_quarter()).0 / 2;
-
-        self.positions[row as usize][col as usize] = id
-    }
-
-    fn no_repetitions(&self) -> bool {
-        let mut set = AHashSet::new();
-        for row in &self.positions {
-            for id in row {
-                if let Some(id) = id {
-                    if set.contains(id) {
-                        return false;
-                    }
-                    set.insert(id);
-                }
-            }
-            set.clear();
-        }
-        true
-
-    }
-
-
-}
-
-#[derive(Debug)]
-struct ThreadCoord {
-    row: Quarters,
-    col: Quarters
-}
-
 
 impl<T: Copy> Pattern<T> {
     fn new(tiles: List<List<T>>) -> Self {
@@ -274,15 +205,11 @@ impl<T: Copy> Pattern<T> {
         }
 
     }
-}
-
-impl<'a, T: Copy> IntoIterator for &'a Pattern<T> {
-    type Item = (TileCoord, T);
-    type IntoIter = PatternIter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
+    fn coords(&self) -> PatternIter {
         PatternIter {
-            pattern: self,
+            rows: self.tiles.len() as _,
+            max_width: self.max_size,
+            first_big: self.first_big(),
             coord: TileCoord {
                 row: Halves::from_whole(0),
                 col: if self.first_big() {
@@ -295,19 +222,30 @@ impl<'a, T: Copy> IntoIterator for &'a Pattern<T> {
     }
 }
 
+
 impl<T: Copy> Index<TileCoord> for Pattern<T> {
     type Output = T;
 
     fn index(&self, coord: TileCoord) -> &Self::Output {
         self.validate(coord);
-        &self.tiles[coord.row.round_down() as usize][coord.col.round_down() as usize]
+
+        &self.tiles[coord.row.times_two() as usize][coord.col.round_down() as usize]
+    }
+}
+impl<T: Copy> IndexMut<TileCoord> for Pattern<T> {
+    fn index_mut(&mut self, coord: TileCoord) -> &mut Self::Output {
+        self.validate(coord);
+
+        &mut self.tiles[coord.row.times_two() as usize][coord.col.round_down() as usize]
     }
 }
 
 impl<T: Display + Copy> Debug for Pattern<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut prev = None;
-        for (coord, tile_) in self {
+        for coord in self.coords() {
+            let tile_ = self[coord];
+            
             if (coord.row == Halves::from_whole(0) && coord.col.times_two() <= 1) || Some(coord.row) != prev.map(|prev: TileCoord| prev.row) {
                 write!(f, "\n")?;
                 if coord.col.is_round() {
@@ -317,9 +255,9 @@ impl<T: Display + Copy> Debug for Pattern<T> {
                 }
             }
             // for debugging indices
-            //write!(f, " ({}, {}) ", coord.row, coord.col)?;
+            write!(f, " ({}, {}) ", coord.row, coord.col)?;
             //write!(f, " ({}, {}) ", coord.row.times_two(), coord.col.round_down())?;
-            write!(f, " {tile_}")?;
+            //write!(f, " {tile_}")?;
 
             prev = Some(coord);
         }
@@ -334,41 +272,48 @@ struct TileCoord {
     col: Halves
 }
 
-struct PatternIter<'a, T: Copy> {
-    pattern: &'a Pattern<T>,
+struct PatternIter {
+    rows: number,
+    max_width: number,
+    first_big: bool,
     coord: TileCoord,
 }
 
-impl<'a, T: Copy> Iterator for PatternIter<'a, T> {
-    type Item = (TileCoord, T);
+impl Iterator for PatternIter {
+    type Item = TileCoord;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let PatternIter { pattern, coord } = self;
-        pattern.validate(*coord);
+        let PatternIter { coord, rows, first_big, max_width } = self;
 
         let coord_clone = coord.clone();
 
         let TileCoord { row, col } = coord;
-        if row.times_two() >= pattern.tiles.len() as number {
+        if row.times_two() >= *rows {
             return None;
         }
 
-        let row_index = row.times_two() as usize;
         let col_index = col.round_down() as usize;
 
-        let tile_ = pattern.tiles[row_index][col_index];
+        let result = Some(coord_clone);
+        // :^)
+        let offset_row = *first_big ^ row.is_round();
 
-        let result = Some((coord_clone, tile_));
+        //println!("");
+        //println!("coord: {:?}", coord_clone);
+        //println!("offset_row: {:?}", offset_row);
 
-        if col_index == pattern.tiles[row_index].len() - 1 {
+        if (offset_row && col_index as number == *max_width - 2) || 
+            (!offset_row && col_index as number == *max_width - 1) {
+
             // end of line.
             *row = *row + Halves::one_half();
 
-            // :-)
-            *col = if pattern.first_big() ^ row.is_round() { 
-                Halves::one_half()
-            } else {
+            *col = if offset_row { 
+                // this row was offset, so the next shouldn't be
                 Halves::from_whole(0)
+            } else {
+                // vice versa
+                Halves::one_half()
             };
         } else {
             *col = *col + Halves::from_whole(1);
@@ -378,12 +323,22 @@ impl<'a, T: Copy> Iterator for PatternIter<'a, T> {
     }
 }
 
+
+
+#[derive(Copy,Clone,PartialEq,Eq,Hash,PartialOrd,Ord, Debug)]
+enum Move {
+    RR, 
+    RL,
+    LR,
+    LL
+}
+use Move::*;
+
 impl Display for Move {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str((*self).into())
     }
 }
-
 impl Into<&'static str> for Move {
     fn into(self) -> &'static str {
         match self {
@@ -397,15 +352,191 @@ impl Into<&'static str> for Move {
     }
 }
 
-#[derive(Copy,Clone,PartialEq,Eq,Hash,PartialOrd,Ord, Debug)]
-enum Move {
-    RR, 
-    RL,
-    LR,
-    LL
+type ThreadID = u8;
+
+struct ThreadGrid {
+    width: number,
+    height: number,
+    positions: List<List<Option<ThreadID>>>
 }
 
-use Move::*;
+impl ThreadGrid {
+    fn new<T: Copy>(pattern: &Pattern<T>) -> Self {
+        let width = pattern.max_size * 2;
+        let height = pattern.tiles.len() as number + 1;
+        let positions = vec![vec![None; width as usize]; height as usize];
+
+        ThreadGrid {
+            width,
+            height,
+            positions
+        }
+    }
+
+    fn get(&self, coord: ThreadCoord) -> Option<ThreadID> {
+        assert!(coord.row.0.rem_euclid(2) == 1, "coord.row must be aligned to a quarter, not a half or whole: {:?}", coord);
+        assert!(coord.col.0.rem_euclid(2) == 1, "coord.col must be aligned to a quarter, not a half or whole: {:?}", coord);
+        // the coordinate system is: index [0,0] corresponds to [-0.25, -0.25]; index [1, 1] corrseponds to 
+        let row = (coord.row + Quarters::one_quarter()).0 / 2;
+        let col = (coord.col + Quarters::one_quarter()).0 / 2;
+
+        self.positions[row as usize][col as usize]
+    }
+
+    fn set(&mut self, coord: ThreadCoord, id: Option<ThreadID>) {
+        assert!(coord.row.0.rem_euclid(2) == 1, "coord.row must be aligned to a quarter, not a half or whole: {:?}", coord);
+        assert!(coord.col.0.rem_euclid(2) == 1, "coord.col must be aligned to a quarter, not a half or whole: {:?}", coord);
+        // the coordinate system is: index [0,0] corresponds to [-0.25, -0.25]; index [1, 1] corrseponds to 
+        let row = (coord.row + Quarters::one_quarter()).0 / 2;
+        let col = (coord.col + Quarters::one_quarter()).0 / 2;
+
+        self.positions[row as usize][col as usize] = id
+    }
+
+    fn apply(&mut self, tile_coord: TileCoord, pattern: &Pattern<Move>, colors: &mut Pattern<Rgba<u8>>, color_mapping: &AHashMap<u8, Rgba<u8>>) {
+        let center = ThreadCoord {
+            row: Quarters::from_halves(tile_coord.row),
+            col: Quarters::from_halves(tile_coord.col)
+        };
+        let top_left = ThreadCoord {
+            row: center.row - Quarters::one_quarter(),
+            col: center.col - Quarters::one_quarter()
+        };
+        let top_right = ThreadCoord {
+            row: center.row - Quarters::one_quarter(),
+            col: center.col + Quarters::one_quarter()
+        };
+        let bottom_left = ThreadCoord {
+            row: center.row + Quarters::one_quarter(),
+            col: center.col - Quarters::one_quarter()
+        };
+        let bottom_right = ThreadCoord {
+            row: center.row + Quarters::one_quarter(),
+            col: center.col + Quarters::one_quarter()
+        };
+
+        let in_left = self.get(top_left);
+        let in_right = self.get(top_right);
+
+        println!("apply {tile_coord:?} {top_left:?}->{in_left:?} {top_right:?}->{in_right:?}");
+
+        let move_ = pattern[tile_coord];
+
+        let (out_left, out_right) = if move_ == Move::LL || move_ == Move::RR {
+            (in_right, in_left)
+        } else {
+            (in_left, in_right)
+        };
+
+        self.set(bottom_left, out_left);
+        self.set(bottom_right, out_right);
+
+        let fill_color = if move_ == LL || move_ == LR {
+            in_right.map(|id| color_mapping[&id]).unwrap_or_default()
+        } else {
+            in_left.map(|id| color_mapping[&id]).unwrap_or_default()
+        };
+        colors[tile_coord] = fill_color;
+
+        let offset_row = pattern.first_big() ^ tile_coord.row.is_round();
+
+        if offset_row { 
+            if tile_coord.col == Halves::one_half() {
+                let copy_in = ThreadCoord {
+                    row: top_left.row,
+                    col: top_left.col - Quarters::from_halves(Halves::one_half()),
+                };
+                let copy_out = ThreadCoord {
+                    row: bottom_left.row,
+                    col: top_left.col - Quarters::from_halves(Halves::one_half()),
+                };
+                self.set(copy_out, self.get(copy_in));
+            }
+            println!("edge: {}", (self.width / 2) - 2);
+            if tile_coord.col.round_down() == (self.width / 2) - 2 {
+                println!("FIRING RIGHT {tile_coord:?}");
+                let copy_in = ThreadCoord {
+                    row: top_right.row,
+                    col: top_right.col + Quarters::from_halves(Halves::one_half()),
+                };
+                let copy_out = ThreadCoord {
+                    row: bottom_right.row,
+                    col: top_right.col + Quarters::from_halves(Halves::one_half()),
+                };
+                self.set(copy_out, self.get(copy_in));
+
+            }
+        }
+
+        if tile_coord.col == Halves::one_half() {
+            // TODO: edges...
+        }
+            
+    }
+
+    fn no_repetitions(&self) -> bool {
+        let mut set = AHashSet::new();
+        for row in &self.positions {
+            for id in row {
+                if let Some(id) = id {
+                    if set.contains(id) {
+                        return false;
+                    }
+                    set.insert(id);
+                }
+            }
+            set.clear();
+        }
+        true
+
+    }
+
+    fn coords(&self) -> ThreadCoords {
+        ThreadCoords { threads: self, coord: ThreadCoord { row: Quarters::from_whole(0) - Quarters::one_quarter(), col: Quarters::from_whole(0) - Quarters::one_quarter() } }
+    }
+
+}
+
+#[derive(Debug, Copy, Clone)]
+struct ThreadCoord {
+    row: Quarters,
+    col: Quarters
+}
+
+struct ThreadCoords<'a> {
+    threads: &'a ThreadGrid,
+    coord: ThreadCoord,
+}
+
+impl<'a> Iterator for ThreadCoords<'a> {
+    type Item = ThreadCoord;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ThreadCoords { threads, coord} = self;
+
+        // yield this at the end
+        let coord_cloned = coord.clone();
+
+        let row_index = (coord.row + Quarters::one_quarter()).0 / 2;
+        let col_index = (coord.col + Quarters::one_quarter()).0 / 2;
+
+        //println!("{:?} {} {}", coord_cloned, row_index, col_index);
+
+        if row_index >= threads.height as number {
+            return None;
+        }
+
+        if col_index == threads.width as number - 1{
+            coord.row = coord.row + Halves::one_half();
+            coord.col = Quarters::from_whole(0) - Quarters::one_quarter();
+        } else {
+            coord.col = coord.col + Halves::one_half();
+        }
+
+        Some(coord_cloned)
+    }
+}
+
 
 
 fn main() {
@@ -416,7 +547,12 @@ fn main() {
           vec![LL, LL, LL, RR],
         vec![LL, LL, RL, LL, LL],
           vec![LL, LL, LL, RR],
-        vec![LL, LL, LL, LL, LL],
+        vec![LL, LL, RR, LL, LL],
+          vec![LL, LL, LL, LL],
+        vec![LL, LL, LL, LR, LL],
+          vec![LL, LL, LL, RR],
+        vec![LL, LL, RL, LL, LL],
+          vec![LL, LL, LL, RR],
     ]);
     println!("valid test pattern: {test_pattern:#?}");
     let test_pattern = Pattern::new( vec![
@@ -436,27 +572,89 @@ fn main() {
 struct Model {
     _window: window::Id,
     font: text::Font,
-    pattern: Pattern<Move>
+    pattern: Pattern<Move>,
+    tile_colors: Pattern<Rgba<u8>>,
+    threads: ThreadGrid,
+    steps: i32,
+    steps_per_second: f32,
+    iterator: PatternIter,
+    color_mapping: AHashMap<u8, Rgba<u8>>,
 }
 
 fn model(app: &App) -> Model {
     let _window = app.new_window().view(view).build().unwrap();
+    let pattern = Pattern::new( vec![
+        vec![LL, LL, RR, LL, LL],
+          vec![LL, LL, LL, LL],
+        vec![LL, LL, LL, LR, LL],
+          vec![LL, LL, LL, RR],
+        vec![LL, LL, RL, LL, LL],
+          vec![LL, LL, LL, RR],
+        vec![LL, LL, RR, LL, LL],
+          vec![LL, LL, LL, LL],
+        vec![LL, LL, LL, LR, LL],
+          vec![LL, LL, LL, RR],
+        vec![LL, LL, RL, LL, LL],
+          vec![LL, LL, LL, RR], 
+        vec![LL, LL, LL, LR, LL],
+          vec![LL, LL, LL, RR],
+        vec![LL, LL, RL, LL, LL],
+          vec![LL, LL, LL, RR],
+        vec![LL, LL, RR, LL, LL],
+          vec![LL, LL, LL, LL],
+        vec![LL, LL, LL, LR, LL],
+          vec![LL, LL, LL, RR],
+        vec![LL, LL, RL, LL, LL],
+          vec![LL, LL, LL, RR], 
+       ]);
+    let tile_colors = Pattern::new( pattern.tiles.iter().map(|row| row.iter().map(|_| rgba(0u8, 0, 0, 0)).collect()).collect() );
+
+    let mut threads = ThreadGrid::new(&pattern);
+    let coords = threads.coords().collect::<Vec<_>>();
+
+    for (i, coord) in coords.iter().take(10).enumerate() {
+        threads.set(*coord, Some(i as _));
+    }
+
+    let iterator = pattern.coords();
+
+    let mut color_mapping = AHashMap::default();
+    color_mapping.insert(0, rgba8(255, 0, 0, 255));
+    color_mapping.insert(1, rgba8(0, 255, 0, 255));
+    color_mapping.insert(2, rgba8(0, 0, 255, 255));
+    color_mapping.insert(3, rgba8(255, 255, 0, 255));
+    color_mapping.insert(4, rgba8(255, 0, 255, 255));
+    color_mapping.insert(5, rgba8(0, 255, 255, 255));
+    color_mapping.insert(6, rgba8(0, 255, 255, 255));
+    color_mapping.insert(7, rgba8(255, 0, 255, 255));
+    color_mapping.insert(8, rgba8(255, 255, 0, 255));
+    color_mapping.insert(9, rgba8(0, 0, 255, 255));
+
+
     Model {
         _window,
-        pattern: Pattern::new( vec![
-            vec![LL, LL, RR, LL, LL],
-              vec![LL, LL, LL, LL],
-            vec![LL, LL, LL, LR, LL],
-              vec![LL, LL, LL, RR],
-            vec![LL, LL, RL, LL, LL],
-              vec![LL, LL, LL, RR],
-            vec![LL, LL, LL, LL, LL],
-        ]),
+        pattern: pattern,
+        tile_colors: tile_colors,
+        threads: threads,
         font: text::Font::from_bytes(include_bytes!("../FiraCode-Retina.ttf")).unwrap(),
+        steps: 0,
+        steps_per_second: 25.0,
+        iterator: iterator,
+        color_mapping: color_mapping
     }
 }
 
-fn update(_app: &App, _model: &mut Model, _update: Update) {}
+fn update(_app: &App, _model: &mut Model, _update: Update) {
+    if _app.time * _model.steps_per_second > _model.steps as f32 {
+        _model.steps += 1;
+
+        if let Some(next) = _model.iterator.next() {
+            _model.threads.apply(next, &_model.pattern, &mut _model.tile_colors, &_model.color_mapping);
+        }
+
+        //println!("step {}", _model.steps);
+    }
+}
 
 fn view(app: &App, model: &Model, frame: Frame) {
    // Begin drawing
@@ -465,14 +663,11 @@ fn view(app: &App, model: &Model, frame: Frame) {
     // drawing in window space
     let draw = app.draw();
 
+
         // Clear the background to black.
     draw.background().color(BLACK);
 
-    draw.text("x=0,y=100")
-        .color(WHITE)
-        .x_y(0.0, 100.0);
-
-    let translation = Vec2::new(-0.0, -0.0);
+    let translation = Vec2::new(-0.0, 300.0);
     let scaling = 70.0;
 
     // pattern 2 window
@@ -491,6 +686,19 @@ fn view(app: &App, model: &Model, frame: Frame) {
     let tilefrac = 0.7;
     assert!(0.5 <= tilefrac && tilefrac <= 1.0);
 
+    // Draw threads
+    for thread_coord in model.threads.coords() {
+        let center = pt2(thread_coord.col.into(), thread_coord.row.into());
+        if let Some(color) = model.threads.get(thread_coord) {
+            let color = model.color_mapping[&color];
+            draw.line()
+                .color(color)
+                .start(p2w(center + vec2(0.0, 0.25)))
+                .end(p2w(center + vec2(0.0, -0.25)));
+
+        }
+    }
+
     // Draw tiles
     let to_top = vec2(0.0, 0.5);
     let to_right = vec2(0.5, 0.0);
@@ -501,15 +709,12 @@ fn view(app: &App, model: &Model, frame: Frame) {
     let to_bottom_corner = to_bottom * tilefrac;
     let to_left_corner = to_left * tilefrac;
 
-    for (coord, move_) in &model.pattern {
+    for coord in model.pattern.coords() {
+        let move_ = model.pattern[coord];
         let center = pt2(coord.col.into(), coord.row.into());
         let points = [p2w(center + to_top_corner), p2w(center + to_right_corner), p2w(center + to_bottom_corner), p2w(center + to_left_corner)];
 
-        let color = if coord.col.is_round() {
-            rgb(100u8,100,100)
-        } else {
-            rgb(50, 50, 50)
-        };
+        let color = model.tile_colors[coord];
 
         draw.polygon()
             .color(color)
